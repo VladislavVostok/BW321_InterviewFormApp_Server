@@ -1,71 +1,146 @@
 package main
 
 import (
-	"bufio"
+	"encoding/json"
 	"fmt"
 	"log"
-	"net"
-	"os"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync"
 )
 
-func main() {
-	// Адрес сервера
-	serverAddress := "127.0.0.1:20080"
+// Модель данных (Candidate)
+type Candidate struct {
+	ID              int    `json:"id"`
+	FullName        string `json:"fullName"`
+	Age             int    `json:"age"`
+	DesiredSalary   int    `json:"desiredSalary"`
+	CorrectAnswers  int    `json:"correctAnswers"`
+	TotalScore      int    `json:"totalScore"`
+	HasExperience   bool   `json:"hasExperience"`
+	HasTeamSkills   bool   `json:"hasTeamSkills"`
+	ReadyForTrips   bool   `json:"readyForTrips"`
+	PassedInterview bool   `json:"passedInterview"`
+}
 
-	// Подключение к серверу
-	conn, err := net.Dial("tcp", serverAddress)
-	if err != nil {
-		log.Fatalf("Не удалось подключиться к серверу: %v\n", err)
+// Хранилище данных (в памяти)
+var (
+	candidates = make(map[int]Candidate)
+	nextID     = 1
+	mu         sync.Mutex
+)
+
+// Извлекает ID из URL (например, "/candidates/42" → 42)
+func extractIDFromURL(r *http.Request) (int, error) {
+	path := r.URL.Path
+	parts := strings.Split(path, "/")
+	if len(parts) < 3 {
+		return 0, fmt.Errorf("invalid URL format")
 	}
-	defer conn.Close()
+	idStr := parts[2]
+	return strconv.Atoi(idStr)
+}
 
-	fmt.Printf("Подключение к серверу %s установлено.\n", serverAddress)
+// GET /candidates
+func getCandidates(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	defer mu.Unlock()
 
-	// Канал для завершения программы
-	done := make(chan bool)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(candidates)
+}
 
-	// Горутина для получения данных с сервера
-	go func() {
-		for {
-			// Буфер для получения данных
-			response := make([]byte, 1024)
-			n, err := conn.Read(response)
-			if err != nil {
-				log.Printf("Соединение с сервером разорвано: %v\n", err)
-				done <- true
-				return
-			}
+// POST /candidates
+func addCandidate(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	defer mu.Unlock()
 
-			// Вывод данных от сервера
-			fmt.Printf("\nОтвет сервера: %s\n", string(response[:n]))
-			fmt.Print(">> ") // Чтобы было удобно продолжать ввод
+	var candidate Candidate
+	if err := json.NewDecoder(r.Body).Decode(&candidate); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	fmt.Println("Отработал чётко!!!!!!!!!!!!")
+	fmt.Println(nextID)
+	candidate.ID = nextID
+	nextID++
+	candidates[candidate.ID] = candidate
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(candidate)
+}
+
+// GET /candidates/{id}
+func getCandidate(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	id, err := extractIDFromURL(r)
+	if err != nil {
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
+	}
+
+	candidate, exists := candidates[id]
+	if !exists {
+		http.Error(w, "Candidate not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(candidate)
+}
+
+// DELETE /candidates/{id}
+func deleteCandidate(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	id, err := extractIDFromURL(r)
+	if err != nil {
+		http.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
+	}
+
+	if _, exists := candidates[id]; !exists {
+		http.Error(w, "Candidate not found", http.StatusNotFound)
+		return
+	}
+
+	delete(candidates, id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func main() {
+	mux := http.NewServeMux()
+
+	// Регистрируем обработчики
+	mux.HandleFunc("/candidates", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			getCandidates(w, r)
+		case http.MethodPost:
+			addCandidate(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
-	}()
+	})
 
-	// Горутина для отправки пользовательских данных на сервер
-	go func() {
-		reader := bufio.NewReader(os.Stdin)
-		for {
-			fmt.Print(">> ")
-			// Считываем строку от пользователя
-			input, err := reader.ReadString('\n')
-			if err != nil {
-				log.Printf("Ошибка ввода: %v\n", err)
-				done <- true
-				return
-			}
-
-			// Отправляем данные на сервер
-			_, err = conn.Write([]byte(input))
-			if err != nil {
-				log.Printf("Ошибка отправки данных: %v\n", err)
-				done <- true
-				return
-			}
+	mux.HandleFunc("/candidates/", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			getCandidate(w, r)
+		case http.MethodDelete:
+			deleteCandidate(w, r)
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
-	}()
+	})
 
-	// Ожидание завершения (по сигналу из канала `done`)
-	<-done
-	fmt.Println("Клиент завершил работу.")
+	port := "9999"
+	fmt.Printf("REST-сервер запущен на http://45.144.221.6:%s\n", port)
+	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
